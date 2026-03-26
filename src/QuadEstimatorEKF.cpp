@@ -106,7 +106,7 @@ void QuadEstimatorEKF::UpdateFromIMU(V3F accel, V3F gyro)
   qt.IntegrateBodyRate(gyro, dtIMU);
 
   // 3. 将更新后的四元数转换回欧拉角（对应公式 44, 45）
-  V3F predictedRPY = qt.ToEulerRPY();
+  V3D predictedRPY = qt.ToEulerRPY();
 
   // 4. 更新 EKF 的状态量
   rollEst = predictedRPY.x;
@@ -119,6 +119,17 @@ void QuadEstimatorEKF::UpdateFromIMU(V3F accel, V3F gyro)
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
+  /////////////////////////////// BEGIN SOLUTION //////////////////////////////
+
+  Quaternion<float> quat =
+      Quaternion<float>::FromEuler123_RPY(rollEst, pitchEst, ekfState(6));
+  quat.IntegrateBodyRate(gyro, dtIMU);
+
+  float predictedPitch = quat.Pitch();
+  float predictedRoll = quat.Roll();
+  ekfState(6) = quat.Yaw();
+
+  //////////////////////////////// END SOLUTION ///////////////////////////////
   // CALCULATE UPDATE
   accelRoll = atan2f(accel.y, accel.z);
   accelPitch = atan2f(-accel.x, 9.81f);
