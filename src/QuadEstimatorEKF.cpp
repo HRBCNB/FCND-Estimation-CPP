@@ -93,13 +93,29 @@ void QuadEstimatorEKF::UpdateFromIMU(V3F accel, V3F gyro)
   // (replace the code below)
   // make sure you comment it out when you add your own code -- otherwise e.g. you might integrate yaw twice
 
-  float predictedPitch = pitchEst + dtIMU * gyro.y;
-  float predictedRoll = rollEst + dtIMU * gyro.x;
-  ekfState(6) = ekfState(6) + dtIMU * gyro.z;	// yaw
+  // float predictedPitch = pitchEst + dtIMU * gyro.y;
+  // float predictedRoll = rollEst + dtIMU * gyro.x;
+  // ekfState(6) = ekfState(6) + dtIMU * gyro.z;	// yaw
+  // 1. 将当前的姿态（Roll, Pitch, Yaw）转换成四元数对象
+  // 注意：ekfState(6) 是当前的 Yaw 估计值
+  Quaternion<float> qt =
+      Quaternion<float>::FromEuler123_RPY(rollEst, pitchEst, ekfState(6));
 
-  // normalize yaw to -pi .. pi
-  if (ekfState(6) > F_PI) ekfState(6) -= 2.f*F_PI;
-  if (ekfState(6) < -F_PI) ekfState(6) += 2.f*F_PI;
+  // 2. 使用四元数进行角速度积分（这就是公式 43 的代码实现）
+  // 该函数内部会自动计算 dq 并更新 qt，处理了非线性的坐标转换
+  qt.IntegrateBodyRate(gyro, dtIMU);
+
+  // 3. 将更新后的四元数转换回欧拉角（对应公式 44, 45）
+  V3F predictedRPY = qt.ToEulerRPY();
+
+  // 4. 更新 EKF 的状态量
+  rollEst = predictedRPY.x;
+  pitchEst = predictedRPY.y;
+  ekfState(6) = predictedRPY.z;  // 更新预测后的 Yaw
+
+  // 5. 依然需要对 Yaw 进行归一化（防止数值超出 -pi 到 pi）
+  if (ekfState(6) > F_PI) ekfState(6) -= 2.f * F_PI;
+  if (ekfState(6) < -F_PI) ekfState(6) += 2.f * F_PI;
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
@@ -162,6 +178,29 @@ VectorXf QuadEstimatorEKF::PredictState(VectorXf curState, float dt, V3F accel, 
 
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
 
+  // 1. 将机体系下的加速度 (accel) 旋转到世界/惯性系 (Inertial Frame)
+  // 注意：输入 accel 已经不包含重力补偿了，所以旋转后我们要手动减去重力加速度 g
+  V3F accelInertial = attitude.Rotate_BtoI(accel);
+
+  // 2. 在世界系下减去重力 (向下为正 Z 轴，所以是减去 g)
+  // 假设 9.81f 是常数，通常在代码其他地方定义为 CONST_GRAVITY
+  accelInertial.z -= 9.81f;
+
+  // 3. 预测位置 (Position Update)
+  // s_new = s_old + v * dt
+  predictedState(0) += curState(3) * dt;  // x
+  predictedState(1) += curState(4) * dt;  // y
+  predictedState(2) += curState(5) * dt;  // z
+
+  // 4. 预测速度 (Velocity Update)
+  // v_new = v_old + a * dt
+  predictedState(3) += accelInertial.x * dt;  // vx
+  predictedState(4) += accelInertial.y * dt;  // vy
+  predictedState(5) += accelInertial.z * dt;  // vz
+
+  // 5. 偏航角 (Yaw)
+  // 提示明确说了：Yaw 的积分已经在 UpdateFromIMU 中完成了，这里不需要重复积分
+  // 所以 predictedState(6) 保持 curState(6) 即可，不需要改动
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
@@ -188,8 +227,29 @@ MatrixXf QuadEstimatorEKF::GetRbgPrime(float roll, float pitch, float yaw)
   //   that your calculations are reasonable
 
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
+  // 1. 预先计算三角函数值，提高运行效率并保持代码整洁
+  float cosPhi = cos(roll);
+  float sinPhi = sin(roll);
+  float cosTheta = cos(pitch);
+  float sinTheta = sin(pitch);
+  float cosPsi = cos(yaw);
+  float sinPsi = sin(yaw);
 
+  // 2. 填充矩阵元素 (Rbg 对 yaw 的偏导数)
+  // 第一列
+  RbgPrime(0, 0) = -cosTheta * sinPsi;
+  RbgPrime(1, 0) = cosTheta * cosPsi;
+  RbgPrime(2, 0) = 0;
 
+  // 第二列
+  RbgPrime(0, 1) = -sinPhi * sinTheta * sinPsi - cosPhi * cosPsi;
+  RbgPrime(1, 1) = sinPhi * sinTheta * cosPsi - cosPhi * sinPsi;
+  RbgPrime(2, 1) = 0;
+
+  // 第三列
+  RbgPrime(0, 2) = -cosPhi * sinTheta * sinPsi + sinPhi * cosPsi;
+  RbgPrime(1, 2) = cosPhi * sinTheta * cosPsi + sinPhi * sinPsi;
+  RbgPrime(2, 2) = 0;
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
   return RbgPrime;
@@ -234,8 +294,17 @@ void QuadEstimatorEKF::Predict(float dt, V3F accel, V3F gyro)
   gPrime.setIdentity();
 
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
-
-
+  // 1. 更新g矩阵
+  gPrime(0, 3) = dt;  // dx/dvx
+  gPrime(1, 4) = dt;  // dy/dvy
+  gPrime(2, 5) = dt;  // dz/dvz
+  for (int i = 0; i < 3; i++) {
+    gPrime(3, 6) += RbgPrime(0, i) * accel[i] * dt;  // dvx/dyaw
+    gPrime(4, 6) += RbgPrime(1, i) * accel[i] * dt;  // dvy/dyaw
+    gPrime(5, 6) += RbgPrime(2, i) * accel[i] * dt;  // dvz/dyaw
+  }
+  // 2. 根据 EKF 方程更新协方差矩阵
+  ekfCov = gPrime * ekfCov * gPrime.transpose() + Q;
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
   ekfState = newState;
@@ -267,20 +336,37 @@ void QuadEstimatorEKF::UpdateFromGPS(V3F pos, V3F vel)
 
 void QuadEstimatorEKF::UpdateFromMag(float magYaw)
 {
-  VectorXf z(1), zFromX(1);
+  VectorXf z(1), zFromX(1);  // 注意：zFromX 是根据当前状态预测的测量值
   z(0) = magYaw;
 
   MatrixXf hPrime(1, QUAD_EKF_NUM_STATES);
   hPrime.setZero();
 
   // MAGNETOMETER UPDATE
-  // Hints: 
+  // Hints:
   //  - Your current estimated yaw can be found in the state vector: ekfState(6)
-  //  - Make sure to normalize the difference between your measured and estimated yaw
+  //  - Make sure to normalize the difference between your measured and
+  //  estimated yaw
   //    (you don't want to update your yaw the long way around the circle)
-  //  - The magnetomer measurement covariance is available in member variable R_Mag
+  //  - The magnetomer measurement covariance is available in member variable
+  //  R_Mag
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
+  // 1. 设置观测雅可比矩阵：只有 Yaw (index 6) 这一项是 1
+  hPrime(0, 6) = 1;
 
+  // 2. 预测的观测值就是当前状态里的 Yaw
+  zFromX(0) = ekfState(6);
+
+  // 3. 角度归一化：处理测量值 z(0)，使其靠近预测值 zFromX(0)
+  // 结果在[-pi, pi]范围内，避免了角度跳变带来的数值问题
+  // 如果差值大于 pi，说明测量值绕远了，减去 2*pi
+  if (z(0) - zFromX(0) > F_PI) {
+    z(0) -= 2.f * F_PI;
+  }
+  // 如果差值小于 -pi，加上 2*pi
+  else if (z(0) - zFromX(0) < -F_PI) {
+    z(0) += 2.f * F_PI;
+  }
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
