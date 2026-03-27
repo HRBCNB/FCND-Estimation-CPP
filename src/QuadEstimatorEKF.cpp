@@ -3,6 +3,7 @@
 #include "Utility/SimpleConfig.h"
 #include "Utility/StringUtils.h"
 #include "Math/Quaternion.h"
+#include <iostream>
 
 using namespace SLR;
 
@@ -89,47 +90,24 @@ void QuadEstimatorEKF::UpdateFromIMU(V3F accel, V3F gyro)
   //       (Quaternion<float> also has a IntegrateBodyRate function, though this uses quaternions, not Euler angles)
 
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
-  // SMALL ANGLE GYRO INTEGRATION:
-  // (replace the code below)
-  // make sure you comment it out when you add your own code -- otherwise e.g. you might integrate yaw twice
 
-  // float predictedPitch = pitchEst + dtIMU * gyro.y;
-  // float predictedRoll = rollEst + dtIMU * gyro.x;
-  // ekfState(6) = ekfState(6) + dtIMU * gyro.z;	// yaw
-  // 1. 将当前的姿态（Roll, Pitch, Yaw）转换成四元数对象
-  // 注意：ekfState(6) 是当前的 Yaw 估计值
-  Quaternion<float> qt =
+  // 1. 创建四元数并积分
+  Quaternion<float> quat =
       Quaternion<float>::FromEuler123_RPY(rollEst, pitchEst, ekfState(6));
+  quat.IntegrateBodyRate(gyro, dtIMU);
 
-  // 2. 使用四元数进行角速度积分（这就是公式 43 的代码实现）
-  // 该函数内部会自动计算 dq 并更新 qt，处理了非线性的坐标转换
-  qt.IntegrateBodyRate(gyro, dtIMU);
+  // 2. 提取预测值（这些变量会被后面的“FUSE INTEGRATION”部分用到）
+  float predictedRoll = quat.Roll();
+  float predictedPitch = quat.Pitch();
 
-  // 3. 将更新后的四元数转换回欧拉角（对应公式 44, 45）
-  V3D predictedRPY = qt.ToEulerRPY();
-
-  // 4. 更新 EKF 的状态量
-  rollEst = predictedRPY.x;
-  pitchEst = predictedRPY.y;
-  ekfState(6) = predictedRPY.z;  // 更新预测后的 Yaw
-
-  // 5. 依然需要对 Yaw 进行归一化（防止数值超出 -pi 到 pi）
+  // 3. 更新并规范化 Yaw
+  ekfState(6) = quat.Yaw();
   if (ekfState(6) > F_PI) ekfState(6) -= 2.f * F_PI;
   if (ekfState(6) < -F_PI) ekfState(6) += 2.f * F_PI;
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
-  /////////////////////////////// BEGIN SOLUTION //////////////////////////////
 
-  Quaternion<float> quat =
-      Quaternion<float>::FromEuler123_RPY(rollEst, pitchEst, ekfState(6));
-  quat.IntegrateBodyRate(gyro, dtIMU);
-
-  float predictedPitch = quat.Pitch();
-  float predictedRoll = quat.Roll();
-  ekfState(6) = quat.Yaw();
-
-  //////////////////////////////// END SOLUTION ///////////////////////////////
   // CALCULATE UPDATE
   accelRoll = atan2f(accel.y, accel.z);
   accelPitch = atan2f(-accel.x, 9.81f);
@@ -191,11 +169,15 @@ VectorXf QuadEstimatorEKF::PredictState(VectorXf curState, float dt, V3F accel, 
 
   // 1. 将机体系下的加速度 (accel) 旋转到世界/惯性系 (Inertial Frame)
   // 注意：输入 accel 已经不包含重力补偿了，所以旋转后我们要手动减去重力加速度 g
+  // std::cout<<"accel before rotation: " << accel.x << ", " << accel.y << ", " << accel.z << std::endl;
   V3F accelInertial = attitude.Rotate_BtoI(accel);
+  
 
   // 2. 在世界系下减去重力 (向下为正 Z 轴，所以是减去 g)
   // 假设 9.81f 是常数，通常在代码其他地方定义为 CONST_GRAVITY
-  accelInertial.z -= 9.81f;
+  // std::cout<<"accelInertial before gravity compensation: " << accelInertial.x << ", " << accelInertial.y << ", " << accelInertial.z << std::endl;
+  accelInertial.z -= CONST_GRAVITY;
+  // std::cout<<"accelInertial after gravity compensation: " << accelInertial.x << ", " << accelInertial.y << ", " << accelInertial.z << std::endl;
 
   // 3. 预测位置 (Position Update)
   // s_new = s_old + v * dt
